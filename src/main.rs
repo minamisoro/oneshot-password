@@ -117,16 +117,16 @@ impl<const N: usize> Password<{ N }> {
         self.check_answer(description) == hint
     }
 
-    pub fn calculate_entropy(
+    pub fn calculate_entropy<'a>(
         &self,
-        answer_set: &[Password<N>],
-    ) -> (f64, HashMap<usize, Vec<Password<N>>>) {
+        answer_set: &'a [Password<N>],
+    ) -> (f64, HashMap<usize, Vec<&'a Password<N>>>) {
         let mut answer_map = HashMap::new();
 
         for ans in answer_set {
             let hints = self.check_answer(ans);
 
-            answer_map.entry(hints).or_insert(vec![]).push(ans.clone());
+            answer_map.entry(hints).or_insert(vec![]).push(ans);
         }
 
         let entropy = answer_map
@@ -154,7 +154,12 @@ fn solve_automatically(
 
         let hint = solution.check_answer(&answer);
 
-        answer_set = distribution.remove(&hint).unwrap();
+        answer_set = distribution
+            .remove(&hint)
+            .unwrap()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
 
         answers.push(answer.clone());
 
@@ -188,7 +193,7 @@ fn solve_all(problem_set: &[Problem]) {
         })
         .collect::<Vec<_>>();
 
-    let worst_case = tries.iter().max_by(|(_, a), (_, b)| a.cmp(b)).unwrap();
+    let worst_case = tries.iter().max().unwrap();
 
     let average = tries.iter().map(|(_, b)| b).sum::<usize>() as f64 / tries.len() as f64;
 
