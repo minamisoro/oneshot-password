@@ -1,13 +1,17 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
+use clap::Parser;
 use derive_more::Display;
 use itertools::Itertools;
 use rand::{thread_rng, Fill, Rng};
+use rayon::prelude::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+};
 use strum::EnumString;
 
 const PASSWORD_LENGTH: usize = 5;
-
 type Problem = Password<PASSWORD_LENGTH>;
+static PROBLEM_SET: OnceLock<Vec<Problem>> = OnceLock::new();
 
 #[derive(Copy, Clone, PartialEq, Eq, EnumString, Display, Debug)]
 enum Color {
@@ -126,47 +130,77 @@ impl<const N: usize> Password<{ N }> {
         }
 
         let entropy = answer_map
-            .iter()
-            .map(|(_, v)| v.len() as f64 / answer_set.len() as f64)
-            .map(|probability| probability * -f64::log2(probability))
+            .par_iter()
+            .map(|(_, v)| -f64::log2(v.len() as f64 / answer_set.len() as f64))
             .sum();
 
         (entropy, answer_map)
     }
 }
 
-fn solve_automatically(global_set: &[Problem], solution: Problem) -> usize {
-    let mut answer_set = global_set.to_vec();
-    let mut attempts = 0;
+fn solve_automatically(
+    problem_set: &[Problem],
+    solution: Problem,
+    print_steps: bool,
+) -> Vec<Problem> {
+    let mut answer_set = problem_set.to_vec();
+    let mut answers = vec![];
     while answer_set.len() > 1 {
-        let mut answer = None;
-        let mut best_entropy = None;
-        let mut distribution = None;
+        let (answer, (_, mut distribution)) = problem_set
+            .par_iter()
+            .map(|comb| (comb.clone(), comb.calculate_entropy(&answer_set)))
+            .max_by(|(_, (entropy_a, _)), (_, (entropy_b, _))| entropy_a.total_cmp(entropy_b))
+            .unwrap();
 
-        for comb in global_set.iter() {
-            let entropy = comb.calculate_entropy(&answer_set);
+        let hint = solution.check_answer(&answer);
 
-            if best_entropy.is_none() || entropy.0 > best_entropy.unwrap() {
-                best_entropy = Some(entropy.0);
-                answer = Some(comb.clone());
-                distribution = Some(entropy.1);
-            }
+        answer_set = distribution.remove(&hint).unwrap();
+
+        answers.push(answer.clone());
+
+        if print_steps {
+            println!("=== {} ===", answer);
+            println!("{} hits | {} remaining", hint, answer_set.len())
         }
-
-        let hint = solution.check_answer(answer.as_ref().unwrap());
-
-        answer_set = distribution.unwrap().remove(&hint).unwrap();
-
-        attempts += 1;
     }
 
-    attempts
+    if print_steps {
+        println!("=== {} ===", answer_set.last().unwrap());
+        println!("{} hits | {} remaining", 5, answer_set.len())
+    }
+
+    return answers;
 }
 
-fn assist_solving(global_set: &[Problem]) {}
+fn assist_solving(problem_set: &[Problem]) {}
 
-fn main() {
-    let mut global_set = vec![
+fn solve_all(problem_set: &[Problem]) {
+    // do it for every possible case
+    let tries = problem_set
+        .clone()
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, solution)| {
+            let attempts = solve_automatically(problem_set, solution.clone(), false).len();
+
+            println!("Solved problem #{i}");
+            (i, attempts)
+        })
+        .collect::<Vec<_>>();
+
+    let worst_case = tries.iter().max_by(|(_, a), (_, b)| a.cmp(b)).unwrap();
+
+    let average = tries.iter().map(|(_, b)| b).sum::<usize>() as f64 / tries.len() as f64;
+
+    println!("Average: {average}");
+    println!(
+        "Worst Case: {} | {} tries",
+        problem_set[worst_case.0], worst_case.1
+    );
+}
+
+fn initialize_problem_set() {
+    let mut problem_set = vec![
         vec![Color::Red],
         vec![Color::Green],
         vec![Color::Blue],
@@ -174,7 +208,7 @@ fn main() {
     ];
 
     for _ in 0..PASSWORD_LENGTH - 1 {
-        global_set = global_set
+        problem_set = problem_set
             .into_iter()
             .cartesian_product(Color::all().into_iter())
             .map(|(mut left, right)| {
@@ -185,37 +219,51 @@ fn main() {
     }
 
     assert!(
-        PASSWORD_LENGTH == global_set.iter().map(Vec::len).sum::<usize>() / global_set.len(),
+        PASSWORD_LENGTH == problem_set.iter().map(Vec::len).sum::<usize>() / problem_set.len(),
         "average of length should equal length!"
     );
 
-    let global_set = global_set
+    let problem_set = problem_set
         .iter()
         .map(|m| Color::to_password(m))
         .collect_vec();
 
-    // do it for every possible case
-    let mut tries = vec![];
-    let mut worst_case = None;
-    let mut worst_count = 0;
-    for (i, solution) in global_set.clone().into_iter().enumerate() {
-        println!("Solving problem #{i}");
-        let attempts = solve_automatically(&global_set, solution.clone());
+    let _ = PROBLEM_SET.set(problem_set);
+}
 
-        tries.push(attempts);
+#[derive(Parser, Debug)]
+struct CmdArgs {
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    once: bool,
+    #[arg(long)]
+    assist: bool,
+}
 
-        if worst_case.is_none() || attempts > worst_count {
-            worst_case = Some(solution);
-            worst_count = attempts;
-        }
+fn main() {
+    let args = CmdArgs::parse();
+
+    initialize_problem_set();
+
+    let problem_set = PROBLEM_SET.get().unwrap();
+
+    if args.all {
+        println!("Solving every combination of passwords");
+        solve_all(problem_set);
     }
 
-    let average = tries.iter().sum::<usize>() as f64 / tries.len() as f64;
+    if args.once {
+        println!("Solving one problem in detail");
 
-    println!("Average: {average}");
-    println!(
-        "Worst Case: {} | {} tries",
-        worst_case.unwrap(),
-        worst_count
-    );
+        let solution: Password<PASSWORD_LENGTH> = Password::generate();
+        println!("solution: {}\n", solution);
+
+        let _ = solve_automatically(problem_set, solution, true);
+    }
+
+    // WIP
+    // if args.assist {
+    //     assist_solving(problem_set);
+    // }
 }
