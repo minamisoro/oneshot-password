@@ -193,7 +193,7 @@ fn solve_all(problem_set: &[Problem]) {
         })
         .collect::<Vec<_>>();
 
-    let worst_case = tries.iter().max().unwrap();
+    let worst_case = tries.iter().max_by(|(_, t1), (_, t2)| t1.cmp(t2)).unwrap();
 
     let average = tries.iter().map(|(_, b)| b).sum::<usize>() as f64 / tries.len() as f64;
 
